@@ -1,0 +1,207 @@
+---
+version: "3.7"
+
+networks:
+  projectnet:
+    external: true
+  internal:
+    external: false
+
+services:
+
+  traefik:
+    # The official v2.0 Traefik docker image
+    image: traefik:v2.0
+    # Enables the web UI and tells Traefik to listen to docker
+    container_name: traefik
+    restart: always
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.https.address=:443"
+      - "--entrypoints.ssh.address=:22"
+      - "--api"
+      - "--api.debug"
+    ports:
+      # The HTTP port
+      - "80:80"
+      # - "443:443"
+      # The Web UI (enabled by --api.insecure=true)
+      - "8080:8080"
+    volumes:
+      # So that Traefik can listen to the Docker events
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - internal
+      - projectnet
+    container_name: traefik
+
+  postgres:
+    image: postgres:latest
+    restart: always
+    environment:
+      POSTGRES_USER: 'gitea'
+      POSTGRES_PASSWORD: 'gitea'
+      POSTGRES_DB: 'gitea'
+    labels:
+      traefik.enable: "false"
+    networks:
+      - internal
+      - projectnet
+    volumes:
+      - ./postgres:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    container_name: postgres
+
+  gitea:
+    image: gitea/gitea:latest
+    container_name: gitea
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+      DB_TYPE: "postgres"
+      DB_HOST: "postgres:5432"
+      DB_NAME: "gitea"
+      DB_USER: "gitea"
+      DB_PASSWD: "gitea"
+    restart: always
+    volumes:
+      - ./gitea:/data
+    ports:
+      - "3000:3000"
+      - "22:22"
+    labels:
+      # Gitea
+      traefik.enable: "true"
+      traefik.http.routers.gitea-web.rule: "Host(`git.example.com`)"
+      traefik.http.routers.gitea-web.entrypoints: "web"
+      traefik.http.routers.gitea-web.service: "gitea-web-svc"
+      traefik.http.services.gitea-web-svc.loadbalancer.server.port: "3000"
+      traefik.http.services.gitea-web-svc.loadbalancer.server.scheme: "http"
+      # ssh
+      traefik.tcp.routers.gitea-ssh.rule: "HostSNI(`git.example.com`)"
+      traefik.tcp.routers.gitea-ssh.entrypoints: "ssh"
+      traefik.tcp.routers.gitea-ssh.service: "gitea-ssh-svc"
+      traefik.tcp.services.gitea-ssh-svc.loadbalancer.server.port: "22"
+      traefik.docker.network: "projectnet"
+    networks:
+      - internal
+      - projectnet
+    depends_on:
+      - postgres
+
+  drone-server:
+    image: drone/drone:latest
+    container_name: drone-server
+    ports:
+      - "8000:8000"
+      - "9000:9000"
+      - "8888:80"
+      # - 443:443
+    volumes:
+      - ./drone:/var/lib/drone/
+      # - /var/run/docker.sock:/var/run/docker.sock
+    restart: always
+    environment:
+      DRONE_OPEN: "true"
+      DRONE_SECRET: "test"
+      DRONE_NETWORK: "projectnet"
+      DRONE_AGENTS_ENABLED: "true"
+      DRONE_RUNNER_CAPACITY: 2
+      #
+      # - DRONE_GITEA_SERVER=git.example.com
+      DRONE_GITEA_CLIENT_ID: "8cedb1ba-af45-4c8c-9ece-8bcd507adc09"
+      DRONE_GITEA_CLIENT_SECRET: "j2hrxYPC-jQ0X9E4ofxL0yv5qaHF0hs0-uSmkNJ9HMo="
+      DRONE_GITEA_SERVER: "http://git.example.com"
+      DRONE_GITEA_SKIP_VERIFY: "false"
+      # DRONE_GIT_USERNAME: "drone-runner"
+      # DRONE_GIT_PASSWORD: "drone-runner"
+      DRONE_GIT_ALWAYS_AUTH : "true"
+      #
+      DRONE_RPC_SECRET: "d49a67b3c39cb2b4f83ca5310a3f886835c007b6"
+      DRONE_SERVER_HOST: "drone.example.com"
+      DRONE_SERVER_PROTO: "http"
+      # LOG
+      DRONE_LOGS_DEBUG: "true"
+      DRONE_LOGS_TEXT: "true"
+      DRONE_LOGS_PRETTY: "true"
+      DRONE_LOGS_COLOR: "true"
+    networks:
+      - projectnet
+      - internal
+    labels:
+      # # Drone
+      traefik.enable: "true"
+      traefik.http.routers.drone-server.rule: "Host(`drone.example.com`)"
+      traefik.http.routers.drone-server.entrypoints: "web"
+      traefik.http.routers.drone-server.service: "drone-svc"
+      traefik.http.services.drone-svc.loadbalancer.server.port: "80"
+      traefik.docker.network: "projectnet"
+
+  drone-agent:
+    image: drone/agent:latest
+    container_name: drone-agent
+    command: agent
+    restart: always
+    depends_on:
+      - drone-server
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - DRONE_SERVER=drone.example.com:9000
+      - DRONE_SECRET=test
+      - DRONE_SERVER_HOST=drone.example.com
+      - DRONE_RPC_SECRET=d49a67b3c39cb2b4f83ca5310a3f886835c007b6
+    networks:
+      - projectnet
+      - internal
+
+  registry-srv:
+    image: registry:latest
+    container_name: registry-srv
+    restart: always
+    volumes:
+      - ./registry-srv/registry:/var/lib/registry
+      - ./registry-config.yml:/etc/docker/registry/config.yml:ro
+    ports:
+      - "5000:5000"
+    networks:
+      - internal
+      - projectnet
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "projectnet"
+      traefik.http.routers.registry.rule: "Host(`registry.example.com`)"
+      traefik.http.routers.registry.entrypoints: "web"
+      traefik.http.routers.registry.service: "registry-svc"
+      traefik.http.services.registry-svc.loadbalancer.server.port: "5000"
+      traefik.http.routers.registry-https.rule: "Host(`registry.example.com`)"
+      traefik.http.routers.registry-https.entrypoints: "https"
+      traefik.http.routers.registry-https.service: "registry-https-svc"
+      traefik.http.services.registry-https-svc.loadbalancer.server.port: "5000"
+
+  registry-ui:
+    image: joxit/docker-registry-ui:static
+    container_name: registry-ui
+    restart: always
+    ports:
+      - "8280:80"
+    environment:
+      - REGISTRY_TITLE=Private Docker Registry
+      - REGISTRY_URL=http://registry-srv:5000
+      - DELETE_IMAGES=true
+    # depends_on:
+    #   - debugproxy
+    networks:
+      - internal
+      - projectnet
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "traefik_web"
+      traefik.http.routers.registry-ui.rule: "Host(`registry-ui.example.com`)"
+      traefik.http.routers.registry-ui.entrypoints: "web"
+      traefik.http.routers.registry-ui.service: "registry-ui-svc"
+      traefik.http.services.registry-ui-svc.loadbalancer.server.port: "80"
